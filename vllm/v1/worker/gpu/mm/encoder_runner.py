@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.epd_profiling import gpu_forward
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -157,19 +158,20 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             [mm_kwargs[i] for i in order], device=self.device, pin_memory=PIN_MEMORY
         ):
-            cg_manager = self.cudagraph_manager
-            cudagraph_output = (
-                cg_manager.execute(mm_kwargs_batch)
-                if cg_manager is not None
-                and cg_manager.is_captured()
-                and cg_manager.supports_batch(modality, mm_kwargs_batch)
-                else None
-            )
-            batch_outputs = (
-                cudagraph_output
-                if cudagraph_output is not None
-                else self.model.embed_multimodal(**mm_kwargs_batch)
-            )
+            with gpu_forward(num_items):
+                cg_manager = self.cudagraph_manager
+                cudagraph_output = (
+                    cg_manager.execute(mm_kwargs_batch)
+                    if cg_manager is not None
+                    and cg_manager.is_captured()
+                    and cg_manager.supports_batch(modality, mm_kwargs_batch)
+                    else None
+                )
+                batch_outputs = (
+                    cudagraph_output
+                    if cudagraph_output is not None
+                    else self.model.embed_multimodal(**mm_kwargs_batch)
+                )
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
         return [encoder_outputs[i] for i in np.argsort(order)]

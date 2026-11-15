@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
+from vllm.epd_profiling import profile as epd_profile
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EmbedsInput,
@@ -965,6 +966,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
+    @epd_profile("processor")
     def _process_multimodal(
         self,
         prompt: list[int],

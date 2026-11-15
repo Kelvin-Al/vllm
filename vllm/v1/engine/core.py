@@ -34,6 +34,7 @@ from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
 from vllm.envs import enable_envs_cache
+from vllm.epd_profiling import profile as epd_profile
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -700,6 +701,7 @@ class EngineCore:
         interval = self.prefill_schedule_interval
         return interval > 1 and self.num_executed_steps % interval != 0
 
+    @epd_profile("engine_step")
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 

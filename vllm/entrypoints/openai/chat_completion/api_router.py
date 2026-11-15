@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import time
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 
+from vllm import epd_profiling
 from vllm.entrypoints.openai.chat_completion.batch_serving import OpenAIServingChatBatch
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -28,7 +31,27 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-router = APIRouter()
+
+class EPDProfileRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def handle(request: Request):
+            start = time.monotonic_ns()
+            request.state.epd_ingress_ns = start
+            response = await handler(request)
+            epd_profiling.emit(
+                "request",
+                start,
+                time.monotonic_ns(),
+                status=response.status_code,
+            )
+            return response
+
+        return handle
+
+
+router = APIRouter(route_class=EPDProfileRoute if epd_profiling.enabled() else APIRoute)
 ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 
 
@@ -57,6 +80,10 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    if epd_profiling.enabled():
+        ingress = getattr(raw_request.state, "epd_ingress_ns", None)
+        if ingress is not None:
+            epd_profiling.emit("ingress", ingress, time.monotonic_ns())
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )
@@ -72,10 +99,11 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(
-            content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
-        )
+        with epd_profiling.span("response"):
+            return JSONResponse(
+                content=generator.model_dump(),
+                headers=metrics_header(metrics_header_format),
+            )
 
     args = getattr(raw_request.app.state, "args", None)
     keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)

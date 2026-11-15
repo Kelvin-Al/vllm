@@ -11,6 +11,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 
+from vllm import epd_profiling
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -325,7 +326,8 @@ class OpenAIServingChat(GenerateBaseServing):
         parser: Parser | None = None
         if self.parser_cls is not None:
             parser = self._make_parser(request, tokenizer, chat_template_kwargs)
-        result = await self.render_chat_request(request)
+        with epd_profiling.span("render"):
+            result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -353,6 +355,20 @@ class OpenAIServingChat(GenerateBaseServing):
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
             mm_token_counts = _get_mm_token_counts(engine_input)
+            if epd_profiling.enabled():
+                placeholders = cast(
+                    MultiModalPlaceholders | None, engine_input.get("mm_placeholders")
+                )
+                if placeholders and "image" in placeholders:
+                    now = time.monotonic_ns()
+                    epd_profiling.emit(
+                        "tokens",
+                        now,
+                        now,
+                        visual_tokens=sum(
+                            item.get_num_embeds() for item in placeholders["image"]
+                        ),
+                    )
 
             # If we are creating sub requests for multiple prompts, ensure that they
             # have unique request ids.
@@ -994,6 +1010,10 @@ class OpenAIServingChat(GenerateBaseServing):
                 err_type="InternalServerError",
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+
+        if epd_profiling.enabled():
+            ready = time.monotonic_ns()
+            epd_profiling.emit("output_ready", ready, ready)
 
         choices: list[ChatCompletionResponseChoice] = []
         total_reasoning_tokens = 0

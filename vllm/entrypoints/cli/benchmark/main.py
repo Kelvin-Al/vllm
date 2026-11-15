@@ -38,6 +38,8 @@ def maybe_exec_rust_bench() -> None:
 def _import_bench_subcommand_modules() -> None:
     # Imported lazily so `BenchmarkSubcommandBase` subclasses register only
     # when `vllm bench` is actually invoked.
+    import vllm.entrypoints.cli.benchmark.epd_calibrate  # noqa: F401
+    import vllm.entrypoints.cli.benchmark.epd_plan  # noqa: F401
     import vllm.entrypoints.cli.benchmark.forward  # noqa: F401
     import vllm.entrypoints.cli.benchmark.latency  # noqa: F401
     import vllm.entrypoints.cli.benchmark.mm_processor  # noqa: F401

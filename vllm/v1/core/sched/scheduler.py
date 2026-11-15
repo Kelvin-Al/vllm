@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.epd_profiling import profile as epd_profile
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -688,6 +689,7 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    @epd_profile("scheduler")
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:

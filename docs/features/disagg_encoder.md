@@ -62,6 +62,102 @@ and compares the disaggregated outputs against it. Set `MODEL` to use another mo
 or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
 additional configuration options.
 
+### Plan the encoder and PD GPU allocation
+
+`vllm bench epd-plan` estimates a capacity-maximizing split for E+PD on a
+fixed GPU budget. It assumes single-GPU instances, proportional capacity
+within each pool, and no separate bottleneck in routing or cache transfer.
+Use stage rates measured in end-user requests per second per instance,
+for the same workload and serving configuration.
+
+```bash
+vllm bench epd-plan --num-gpus 8 --encoder-rps 50 --pd-rps 12 \
+    --encoder-rps-range 45 55 --pd-rps-range 11 13
+```
+
+The command reports the selected GPU counts, predicted saturation capacity,
+and the encoder-to-PD rate ratio interval in which the split stays optimal.
+It also checks whether the supplied rate ranges fit within that interval
+and reports capacity at their lower endpoints for the selected split.
+Pass `--current-encoder-gpus` to keep the current split on a tie. The upper
+ratio endpoint is `null` when the interval is unbounded. Use
+`--output-json PATH` to save the plan for deployment tooling.
+
+Calibrate on the deployed E+PD path. Use an open-loop replay with enough
+capacity in the other pool to find each stage's throughput plateau. Match
+the media mix, input and output lengths, connector, CPU budget, cache hit
+rates, and routing policy to the intended deployment. Monitor queues and
+completion counts at both stages to identify the bottleneck. For an
+encoder that handles individual media items, normalize to the same
+original request stream as PD.
+
+Validate the selected split at the target offered load through the EPD
+endpoint. Use [`vllm bench serve`](../cli/bench/serve.md) to measure TTFT,
+TPOT, and goodput, and track failure and unfinished request counts. Leave
+headroom below the predicted saturation rate. The command covers capacity
+planning for E+PD. Fully disaggregated E/P/D needs separate P and D profiles.
+
+### Fit a profile and plan for a different workload
+
+Set `VLLM_EPD_PROFILE_DIR` on the encoder process to an existing directory
+to collect per-process JSONL events. The native calibration path currently
+targets a single-GPU CUDA encoder-only runner with `ECExampleConnector`,
+non-streaming encoder requests, and one uncached image per request. Use one
+media loading thread and one renderer worker for this profile. Capture the
+production settings you intend to keep during replay.
+
+Collect a serial and a sustained-backlog replay at each of five or more
+merged visual token counts. The encoder records the image embedding count
+after preprocessing and spatial merging. Keep enough PD capacity to isolate
+encoder load.
+Provide `serial-<anchor>-window.json` and `saturated-<anchor>-window.json`
+in the capture directory, with `begin_ns` and `end_ns` on the same host
+monotonic clock as the events, plus `rate` and `offered_seconds` for each
+sustained replay. Place encoder events under `native-profile/`.
+
+```bash
+vllm bench epd-calibrate --capture-dir encoder-capture \
+    --pd-capture-dir pd-capture --output-json frozen-model.json
+vllm bench epd-plan --num-gpus 4 --frozen-model frozen-model.json \
+    --workload heldout-workload.json --output-json blind-plan.json
+```
+
+Use `--min-visual-tokens` when calibrating a profile for a workload that
+excludes small inputs. Choose anchors so that the resulting calibrated range
+covers the target workload. The planner reports that range and rejects
+workloads with requests outside it.
+
+The encoder fit contains serial component curves, saturated resource demand
+curves, and the unattributed interval from the serial audit.
+In each pass, the GPU forward `G` is fitted as a quadratic. The worker cycle
+`X` is reconstructed as `G` plus an affine fit to the observed `X - G`,
+so both curves share the forward's quadratic coefficient. Affine component
+fits have nonnegative predictions throughout the calibrated token range.
+For PD, collect a sustained replay with one profiled PD replica using
+`--no-async-scheduling` and a fixed `--max-num-batched-tokens` budget. Supply a
+`run-config.json` with `encoders`, `pd`, `base_port`, `profile_pd`, `pd_chunk`,
+`model`, and `pd_kv_bytes`. Name the replay window `pd-training-window.json`.
+For PD HTTP port `<port>`, put PD events in `native-profile-pd-<port>/` and
+the startup log in `pd-<port>.log`. The calibrator reads KV token capacity
+from the startup log and averages engine step times in the replay window.
+Omit `--pd-capture-dir` to fit just the encoder.
+
+The workload file contains `encoder` rows with `visual_tokens` and a `pd`
+object with joint `input_lens` and `output_lens` arrays and the `failed` count.
+The planning result includes SHA-256 digests for both inputs, the PD packing
+range, and predicted capacities and bottlenecks for the chosen allocation and
+its neighbors. With a frozen profile, the range check varies the PD rate
+within the packing range while holding the encoder estimate fixed.
+
+Encoder estimates use the inverse of the highest mean normalized resource
+demand as an upper bound. The planner uses the lower PD rate from the
+[Nie et al. KV cache model](https://arxiv.org/html/2605.04595v1#S4), with the
+workload's largest observed input plus output length as the packing slack.
+The PD approximation requires representative batch time and a workload
+whose backlog keeps KV occupancy high. Validate the E and PD rates with
+separate bottleneck replays before using them to plan an allocation. Inspect
+the serial audit residual before interpreting the elapsed-time fit.
+
 ### Audio inputs
 
 The Python EPD proxy also rewrites audio in `/v1/chat/completions` into

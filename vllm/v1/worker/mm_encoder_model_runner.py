@@ -16,6 +16,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.epd_profiling import profile_encoder_batch
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -120,6 +121,7 @@ class MMEncoderModelRunner(GPUModelRunner):
         )
 
     @torch.inference_mode()
+    @profile_encoder_batch
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",

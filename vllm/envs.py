@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
+    VLLM_EPD_PROFILE_DIR: str | None = None
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
@@ -1058,6 +1059,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_LOADING_THREAD_COUNT": lambda: int(
         os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")
     ),
+    # Existing directory for opt-in, per-process EPD calibration events.
+    "VLLM_EPD_PROFILE_DIR": lambda: os.getenv("VLLM_EPD_PROFILE_DIR"),
     # Maximum filesize in MB for a single audio file. Enforced on all
     # audio inputs (multimodal chat, speech-to-text uploads, data: URLs,
     # and local file:// paths). Files larger than this will be rejected

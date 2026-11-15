@@ -10,6 +10,7 @@ import torch
 from PIL import Image
 
 import vllm.envs as envs
+from vllm.epd_profiling import profile as epd_profile
 from vllm.utils.serial_utils import numpy2tensor, tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
@@ -78,6 +79,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
             return image
         return convert_image_mode(image, self.image_mode, self.rgba_background_color)
 
+    @epd_profile("media")
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         try:
             image = open_image(BytesIO(data))

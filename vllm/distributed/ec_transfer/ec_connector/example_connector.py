@@ -16,6 +16,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
 )
+from vllm.epd_profiling import span as epd_span
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -127,7 +128,8 @@ class ECExampleConnector(ECConnectorBase):
         ec_cache = encoder_cache[mm_hash]
         with gpu_sync_allowed():
             tensors = {"ec_cache": ec_cache.detach().cpu()}
-        safetensors.torch.save_file(tensors, filename)
+        with epd_span("handoff"):
+            safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
     def has_cache_item(
