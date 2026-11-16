@@ -30,6 +30,34 @@ for the native calibration and planning commands. The example targets a Linux
 CUDA node, a single uncached image per request, and the filesystem-backed
 `ECExampleConnector`.
 
+## Generate workload data from normal requests
+
+Start the E+PD proxy with `--workload-trace requests.jsonl` and optionally
+set `--workload-sample-rate`. The default samples 1% of requests. Clients
+continue to send ordinary chat completions. The proxy records the merged
+vision tokens reported by E and pairs them with the input and generated
+token counts from PD usage on that request. The file contains sample IDs,
+arrival times, length counts, and outcomes.
+
+When using `disagg_1e1pd_example.sh`, set `EPD_WORKLOAD_TRACE` and optionally
+`EPD_WORKLOAD_SAMPLE_RATE` to enable the same options.
+
+Export a recent arrival cohort and run the planner with a profile calibrated
+for the target deployment.
+
+```bash
+python examples/disaggregated/disaggregated_encoder/epd_capacity/workload_trace.py \
+  --trace requests.jsonl --window-seconds 3600 --output workload.json \
+  --num-gpus 4 --frozen-model frozen-model.json --plan-output plan.json
+```
+
+The exporter requires at least 100 compatible completed samples by default.
+It reports counts for incomplete, failed, cancelled, unsupported, and
+missing-metadata requests. The estimator applies to the exported cohort of
+single-image, single-completion E+PD requests. Use a representative window
+and a profile matching the deployment's media and cache settings. At cold
+start, a short replay with representative requests can populate the trace.
+
 ## Replay a four-GPU recommendation
 
 With the vLLM environment active and a paired native encoder capture

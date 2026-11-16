@@ -166,6 +166,16 @@ def run(args):
                 ",".join(f"http://127.0.0.1:{port}" for port in ports[: args.encoders]),
                 "--decode-servers-urls",
                 ",".join(f"http://127.0.0.1:{port}" for port in ports[args.encoders :]),
+                *(
+                    [
+                        "--workload-trace",
+                        str(args.workload_trace.resolve()),
+                        "--workload-sample-rate",
+                        "1",
+                    ]
+                    if args.workload_trace
+                    else []
+                ),
             ],
         )
         wait_ready({args.base_port: proxy_process}, args.startup_timeout)
@@ -300,6 +310,7 @@ if __name__ == "__main__":
     workload.add_argument("--waves", type=Path)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-pd", action="store_true")
+    parser.add_argument("--workload-trace", type=Path)
     parser.add_argument("--encoder-max-seqs", type=int, default=128)
     parser.add_argument("--pd-kv-bytes", type=int)
     parser.add_argument("--pd-chunk", type=int, default=512)

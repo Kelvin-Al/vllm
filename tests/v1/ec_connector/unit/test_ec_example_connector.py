@@ -53,11 +53,13 @@ def test_metadata_preserves_repeated_item_positions():
     assert items == {
         "A": {
             "modality": "image",
+            "num_embeds": 4,
             "metadata": {"image_grid_thw": [1, 2, 2]},
             "item_indices": [0, 2],
         },
         "B": {
             "modality": "image",
+            "num_embeds": 4,
             "metadata": {"image_grid_thw": [1, 2, 2]},
             "item_indices": [1],
         },

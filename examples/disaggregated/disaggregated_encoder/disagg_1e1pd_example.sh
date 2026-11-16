@@ -163,6 +163,10 @@ else
         --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT"
     )
 fi
+if [[ -n "${EPD_WORKLOAD_TRACE:-}" ]]; then
+    PROXY_ARGS+=(--workload-trace "$EPD_WORKLOAD_TRACE"
+                 --workload-sample-rate "${EPD_WORKLOAD_SAMPLE_RATE:-0.01}")
+fi
 python disagg_epd_proxy.py \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \

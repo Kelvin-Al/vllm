@@ -88,6 +88,8 @@ def collect_ec_item_metadata(
             feature.identifier, {"modality": feature.modality, "item_indices": []}
         )
         entry["metadata"] = metadata
+        if feature.modality == "image":
+            entry["num_embeds"] = feature.mm_position.get_num_embeds()
         entry["item_indices"].append(index)
     return items
 

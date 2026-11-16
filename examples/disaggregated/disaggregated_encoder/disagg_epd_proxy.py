@@ -34,6 +34,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -42,6 +43,15 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
+
+if __name__ == "__main__":
+    from epd_capacity import workload_trace
+else:
+    from examples.disaggregated.disaggregated_encoder.epd_capacity import workload_trace
+
+RequestSample = workload_trace.RequestSample
+StreamUsage = workload_trace.StreamUsage
+TraceSampler = workload_trace.TraceSampler
 
 ###############################################################################
 # FastAPI app & global state
@@ -319,6 +329,7 @@ class EPDProxyConfig:
     probe_timeout: float = 2.0
     fail_threshold: int = 3
     evicted_ttl: float = 900.0
+    workload_sampler: TraceSampler | None = None
 
 
 @dataclass
@@ -1004,6 +1015,7 @@ async def prepare_for_decode(
     p_url: str,
     consumer_zmq: str | None,
     prefill_dp_rank: int | None = None,
+    sample: RequestSample | None = None,
 ) -> tuple[dict, float, float]:
     """Encode, rewrite and prefill, returning the body to send to decode.
 
@@ -1014,6 +1026,8 @@ async def prepare_for_decode(
     item_meta, ec_params = await fanout_encoder_primer(
         req_data, e_urls, req_id, consumer_zmq
     )
+    if sample is not None:
+        sample.record_image(item_meta, ec_params)
     _t1 = time.perf_counter()
     prepared = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
     if ec_params:
@@ -1037,12 +1051,13 @@ async def forward_non_stream(
     consumer_zmq: str | None,
     dp_rank: int | None = None,
     prefill_dp_rank: int | None = None,
+    sample: RequestSample | None = None,
 ) -> Response:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
             prepared, encode_s, rewrite_s = await prepare_for_decode(
-                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
+                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank, sample
             )
             _t2 = time.perf_counter()
 
@@ -1079,6 +1094,12 @@ async def forward_non_stream(
                     )
                     raise HTTPException(status_code=resp.status, detail=detail)
                 out = await resp.read()
+                if sample is not None:
+                    with suppress(msgspec.DecodeError):
+                        body = msgspec.json.decode(out)
+                        if isinstance(body, dict):
+                            sample.record_usage(body)
+                    sample.finish("completed")
                 _t3 = time.perf_counter()
                 logger.info(
                     "STAGE %s encode=%.1f rewrite=%.1f decode=%.1f total=%.1f "
@@ -1101,11 +1122,18 @@ async def forward_non_stream(
                 )
         raise HTTPException(status_code=500, detail="Decode failed after re-encoding")
 
+    except asyncio.CancelledError:
+        if sample is not None:
+            sample.finish("cancelled")
+        raise
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("[%s] Error in forward_non_stream: %s", req_id, str(e))
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}") from e
+    finally:
+        if sample is not None:
+            sample.finish("failed")
 
 
 async def forward_stream(
@@ -1117,13 +1145,30 @@ async def forward_stream(
     consumer_zmq: str | None,
     dp_rank: int | None = None,
     prefill_dp_rank: int | None = None,
+    sample: RequestSample | None = None,
 ) -> AsyncIterator[bytes]:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
             prepared, encode_s, rewrite_s = await prepare_for_decode(
-                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
+                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank, sample
             )
+            usage = None
+            if sample is not None:
+                options = prepared.get("stream_options")
+                injected = options is None or (
+                    isinstance(options, dict) and not options.get("include_usage")
+                )
+                if injected:
+                    prepared = {
+                        **prepared,
+                        "stream_options": {
+                            **(options or {}),
+                            "include_usage": True,
+                            "continuous_usage_stats": False,
+                        },
+                    }
+                usage = StreamUsage(sample, injected)
             _t2 = time.perf_counter()
 
             logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
@@ -1152,10 +1197,18 @@ async def forward_stream(
                     continue
                 resp.raise_for_status()
                 async for chunk in resp.content.iter_any():
-                    if chunk:
-                        if _first is None:
-                            _first = time.perf_counter()
+                    if chunk and _first is None:
+                        _first = time.perf_counter()
+                    if usage is None:
                         yield chunk
+                    else:
+                        for frame in usage.feed(chunk):
+                            yield frame
+                if usage is not None:
+                    for frame in usage.finish():
+                        yield frame
+                    if usage.done and not usage.error:
+                        sample.finish("completed")
             _t3 = time.perf_counter()
 
             logger.info(
@@ -1171,6 +1224,10 @@ async def forward_stream(
             logger.info("[%s] Streaming completed", req_id)
             return
 
+    except (asyncio.CancelledError, GeneratorExit):
+        if sample is not None:
+            sample.finish("cancelled")
+        raise
     except HTTPException:
         logger.exception("[%s] HTTPException in forward_stream", req_id)
         raise
@@ -1179,11 +1236,27 @@ async def forward_stream(
         raise HTTPException(
             status_code=500, detail=f"Proxy streaming error: {str(e)}"
         ) from e
+    finally:
+        if sample is not None:
+            sample.finish("failed")
 
 
 ###############################################################################
 # Public routes
 ###############################################################################
+
+
+def sample_workload(app, request_data, prefill_url):
+    sampler = getattr(app.state, "workload_sampler", None)
+    if sampler is None:
+        return None
+    items = extract_mm_items(request_data)
+    return sampler.start(
+        not prefill_url
+        and len(items) == 1
+        and items[0]["type"] == "image_url"
+        and request_data.get("n", 1) == 1
+    )
 
 
 @app.post("/v1/chat/completions")
@@ -1206,16 +1279,31 @@ async def chat_completions(request: Request):
         consumer_zmq = app.state.d_ec_urls[ec_index] if app.state.d_ec_urls else None
 
         is_streaming = req_data.get("stream", False)
+        sample = sample_workload(app, req_data, p_url)
 
         if is_streaming:
             return StreamingResponse(
                 forward_stream(
-                    req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+                    req_data,
+                    req_id,
+                    e_urls,
+                    p_url,
+                    d_url,
+                    consumer_zmq,
+                    dp_rank,
+                    sample=sample,
                 ),
                 media_type="text/event-stream",
             )
         return await forward_non_stream(
-            req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+            req_data,
+            req_id,
+            e_urls,
+            p_url,
+            d_url,
+            consumer_zmq,
+            dp_rank,
+            sample=sample,
         )
 
     except HTTPException:
@@ -1384,6 +1472,7 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.state.proxy = proxy
     app.state.registry = registry
+    app.state.workload_sampler = config.workload_sampler
 
     @app.get("/instances")
     async def list_instances():
@@ -1430,11 +1519,13 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
             "dp_rank": route.dp_rank if route.prefill is None else None,
             "prefill_dp_rank": route.dp_rank if route.prefill is not None else None,
         }
+        sample = sample_workload(app, req_data, route.prefill)
         if req_data.get("stream", False):
             return StreamingResponse(
-                forward_stream(*args, **ranks), media_type="text/event-stream"
+                forward_stream(*args, **ranks, sample=sample),
+                media_type="text/event-stream",
             )
-        return await forward_non_stream(*args, **ranks)
+        return await forward_non_stream(*args, **ranks, sample=sample)
 
     @app.get("/v1/models")
     async def list_models():
@@ -1493,6 +1584,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--workload-trace", type=Path, help="Append sampled E+PD request shapes here."
+    )
+    parser.add_argument("--workload-sample-rate", type=float, default=0.01)
     parser.add_argument(
         "--dynamic-registration",
         action="store_true",
@@ -1565,6 +1660,13 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if not 0 < args.workload_sample_rate <= 1:
+        parser.error("--workload-sample-rate must be in (0, 1]")
+    sampler = (
+        TraceSampler(args.workload_trace, args.workload_sample_rate)
+        if args.workload_trace
+        else None
+    )
     if args.fail_threshold < 1:
         parser.error("--fail-threshold must be at least 1")
     if args.log_requests:
@@ -1590,11 +1692,13 @@ if __name__ == "__main__":
                 probe_timeout=args.probe_timeout,
                 fail_threshold=args.fail_threshold,
                 evicted_ttl=args.evicted_ttl,
+                workload_sampler=sampler,
             )
         )
         if args.log_requests:
             app.middleware("http")(log_requests)
     else:
+        app.state.workload_sampler = sampler
         if not args.encode_servers_urls or not args.decode_servers_urls:
             parser.error(
                 "Static routing requires --encode-servers-urls "

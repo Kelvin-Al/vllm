@@ -8,13 +8,15 @@ import json
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from math import ceil
 from pathlib import Path
 from statistics import fmean
 
 from summarize_epd_superpod import observe_metrics
+from workload_trace import export
 
-from vllm.benchmarks.epd_capture import read_events, read_json, window_events
+from vllm.benchmarks.epd_capture import read_json
 
 
 def write_json(path, data):
@@ -28,6 +30,10 @@ def lengths(path, count):
     if result["failed"] or result["completed"] != count:
         raise ValueError(f"Invalid corpus replay at {path}")
     return {name: result[name] for name in ("input_lens", "output_lens", "failed")}
+
+
+def length_pairs(pd):
+    return Counter(zip(pd["input_lens"], pd["output_lens"], strict=True))
 
 
 def prepare(output, encoder_capture, serve):
@@ -84,34 +90,29 @@ def prepare(output, encoder_capture, serve):
         "prompts": count,
         "seed": 8161,
     }
+    trace_path = output / "sampled-requests.jsonl"
     trace = serve(
         "offline-heldout-trace",
         1,
         1,
         [{"name": "trace", "rate": 4, **replay}],
-        profile=True,
         encoder_max_seqs=1,
+        workload_trace=trace_path,
     )
-    encoder_samples = [
-        {"visual_tokens": event["visual_tokens"]}
-        for event in window_events(
-            read_events(trace / "native-profile"),
-            read_json(trace / "trace-window.json"),
-            central=False,
-        )
-        if event["stage"] == "tokens"
-    ]
+    observed = export(trace_path)
+    encoder_samples = observed["encoder"]
     if len(encoder_samples) != count:
         raise ValueError(
             f"Expected {count} encoder shapes, captured {len(encoder_samples)}"
         )
     if {r["visual_tokens"] for r in encoder_samples} != {2500, 3844, 5476}:
         raise ValueError("The held-out shapes differ from the preassigned corpus")
-    pd_samples = lengths(trace / "trace.json", count)
+    if length_pairs(observed["pd"]) != length_pairs(
+        lengths(trace / "trace.json", count)
+    ):
+        raise ValueError("Sampled PD length pairs differ from client usage")
     workload = output / "offline-heldout.json"
-    write_json(
-        workload, {"encoder": encoder_samples, "pd": pd_samples, "replay": replay}
-    )
+    write_json(workload, {**observed, "replay": replay})
     plan_path = output / "offline-plan.json"
     subprocess.run(
         [
@@ -181,7 +182,9 @@ def run_offline(output, encoder_capture, serve, previous=None):
                 encoder_max_seqs=1,
             )
             base = read_json(capture / "run-config.json")["base_port"]
-            if lengths(capture / f"{name}.json", count) != pd_samples:
+            if length_pairs(lengths(capture / f"{name}.json", count)) != length_pairs(
+                pd_samples
+            ):
                 raise ValueError(
                     f"The replay corpus changed for {encoders}E+{pd}PD at {rate} req/s"
                 )
@@ -255,7 +258,14 @@ def main():
     args.output.mkdir(parents=True)
 
     def serve(
-        name, e, pd, waves, profile=False, profile_pd=False, encoder_max_seqs=128
+        name,
+        e,
+        pd,
+        waves,
+        profile=False,
+        profile_pd=False,
+        encoder_max_seqs=128,
+        workload_trace=None,
     ):
         manifest = args.output / f"{name}-waves.json"
         write_json(manifest, waves)
@@ -284,6 +294,7 @@ def main():
                 str(encoder_max_seqs),
                 *(["--profile"] if profile else []),
                 *(["--profile-pd"] if profile_pd else []),
+                *(["--workload-trace", str(workload_trace)] if workload_trace else []),
             ],
             check=True,
         )
