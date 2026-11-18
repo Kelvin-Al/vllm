@@ -19,6 +19,10 @@ referencing #67204 or implementing EPD sizing.
   aggregate worker rates and reports the highest-capacity split.
 - The documentation describes how to measure isolated stage saturation and
   check the estimate using independent requests.
+- Supplementary validation reuses one frozen deployment calibration to estimate
+  service rates for a changed request distribution. With 96 new completed
+  requests supplying workload-shape information, it selects the fastest tested
+  four-GPU split at both offered loads for the tested in-range shift.
 
 ## Validation
 
@@ -126,13 +130,44 @@ Frozen plan SHA-256 `37288277d97d8a5db9ac8ee028a0cd2576d25a3c5256e10b3956b3507b4
 
 
 The same reproducer also runs a workload-shift check when its bundled
-`frozen_predictor/` directory is present. The archived predictor and calibration
-are research artifacts for this validation. The CLI example takes measured E and
-PD service rates directly.
+`frozen_predictor/` directory is present. That package includes the frozen
+calibration, predictor and replay scripts used for the supplementary experiment.
+The code contribution in this PR exposes `size_epd.py`, which takes E and PD
+service rates supplied by measurements or an external estimator. The predictor
+and new-workload shape collection are delivered in the reproduction package.
 
-### Workload shift with the same frozen calibration
+### Adapting to a new workload distribution without refitting
 
-The original mix used three image sizes and a mean target of 48 output tokens. The shifted mix used only 1400×1400 images (2500 merged tokens) and a mean target of 128 output tokens. Model, hardware, cache policy and serving configuration were fixed. We sampled joint prompt and output lengths with seed 6720420 and locked both recommendations before replay with held-out seeds 6720421 and 6720422.
+We reused a previously frozen deployment-level calibration throughout prediction
+and validation. Its frozen parameters comprise the following.
+
+- Encoder per-component fit coefficients for strict-serial spans and saturated
+  resource demands, effective component parallelism, and the calibrated merged
+  token range of 1600–7744 tokens.
+- PD model parameters, including the effective KV token budget (29,120 tokens),
+  prefill chunk budget (512 tokens), and calibrated mean step time
+  (approximately 16.18 ms).
+
+The original mix used three image sizes and a target output length of 48 tokens.
+The shifted mix used only 1400×1400 images and increased the target output length
+to 128 tokens. The serving model, hardware type, batching configuration, transfer
+backend and cache policy were fixed.
+
+For the shifted distribution, we collected **96 completed requests** with seed
+6720420. Their observed prompt and output token counts supplied the new joint PD
+length distribution. The model's image processor confirmed 2500 merged encoder
+tokens for the common image size, supplying the encoder token count for each
+sampled request. The frozen predictor recomputed stage-rate estimates from
+these workload shapes and passed the estimates to the sizing example. The
+sampling measurements were used to characterize request shapes. No fit
+coefficients or deployment calibration parameters were updated.
+
+The sample count of 96 describes this experiment. The prediction procedure
+requires a representative shape sample, including completed output lengths for
+the PD estimate. We locked the updated recommendation and capacity estimate
+before replaying held-out requests with seeds 6720421 and 6720422. The comparison
+baseline retained the recommendation obtained from the original distribution's
+independently measured service rates.
 
 The frozen model estimated E at 17.04 req/s and PD at 4.57–5.06 req/s per worker. It selected `1E+3PD` at 13.70 req/s. Reusing the original rates selected `2E+2PD` at 13.50 req/s.
 
@@ -161,18 +196,18 @@ Frozen model SHA-256 `91e22357828838743e77796a0eae05bb0e9cc0ed54fb46eaf06e04e2a6
 
 The sizing rule is described in §3 of *Provision Before You Serve: Computing
 the E:PD Ratio for Disaggregated Multimodal LLM Serving*, accepted at FAISys.
-The workload-shift check studies whether one calibration can supply rates for
-different request mixes within its encoder token range and under the same serving
-configuration. The archived model recomputes rates from merged encoder tokens
-and paired PD input/output lengths. The baseline keeps the two rates measured
-for the original request mix. The held-out sweep tests both recommendations.
+The workload-shift check tests reuse of the frozen component and PD models when
+the request mix changes within the calibrated encoder token range and under the
+same serving configuration. Workload shapes and derived stage-rate estimates
+are recomputed for the new distribution. The updated recommendation matched the
+fastest measured split at both offered loads without refitting the models.
 This experiment covers one in-range shift on one serving configuration. The PD
 estimate still showed positive error on both shifted-load runs.
 Each split has one run at each of two offered loads, using different seeds.
 These measurements report variation across the tested conditions. They do not
-establish repeated-run confidence intervals. The archived predictor and
-calibration support the supplementary validation, while `size_epd.py` accepts
-rates from either measurements or an external estimator. The archived sizing
+establish repeated-run confidence intervals. The predictor, calibration and
+shape-sampling harness are provided as supplementary reproduction materials.
+`size_epd.py` accepts rates from measurements or an external estimator. The archived sizing
 script produces the same allocation arithmetic. The submitted version adds CLI
 help and finite-capacity input validation.
 
