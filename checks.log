@@ -1,0 +1,11 @@
+Windows Python 3.12 review checks
+python check_sizing.py --repo <review-checkout>
+PASS: four allocations, including a tied optimum, and eight invalid inputs
+python check_results.py --results recorded/results-783695 --reproducer replay
+PASS: 14016 successful requests, 17 runs, isolated calibration, disjoint seeds, frozen hashes, and raw counters
+docs-venv/python check_docs.py --repo <review-checkout>
+Doc file 'features/disagg_encoder.md' contains a link 'mooncake_ec_connector_usage.md', but the target 'features/mooncake_ec_connector_usage.md' is not found among documentation files.
+Doc file 'features/disagg_encoder.md' contains a link '../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh', but the target '../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh' is not found among documentation files.
+Doc file 'features/disagg_encoder.md' contains a link 'cross_encoder_cache.md', but the target 'features/cross_encoder_cache.md' is not found among documentation files.
+Doc file 'features/disagg_encoder.md' contains a link '../assets/features/disagg_encoder/disagg_encoder_flow.png', but the target 'assets/features/disagg_encoder/disagg_encoder_flow.png' is not found among documentation files.
+PASS: rendered feature guide, generated example, and new navigation link
