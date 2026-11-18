@@ -17,6 +17,11 @@ contains the current review draft. The PR branch adds help text and input
 validation to the archived sizing CLI. The valid-rate allocation formula is the
 same. Run `check_sizing.py` against the review checkout to verify its CLI.
 
+The review commit is
+[`d87c252954df0d4970e6c5e5f216a48e2bba12e9`](https://github.com/Kelvin-Al/vllm/commit/d87c252954df0d4970e6c5e5f216a48e2bba12e9).
+`final-diff.patch` contains the complete proposed upstream change, three files
+and 144 added lines. It can be reviewed without extracting the experiment logs.
+
 ## Experimental environment
 
 - SuperPOD job 783695 on dgx-30, four H800 GPUs, driver 580.178.04.
@@ -133,3 +138,43 @@ uv pip install --python .venv/bin/python -r requirements/docs.txt
 The full Windows MkDocs build encountered a CUDA extension import while
 generating unrelated CLI reference pages. The scoped render check is recorded
 separately from a full site build. See `checks.log` for commands and results.
+
+On Windows, put Git Bash and the virtual environment on PATH. The executable
+shebang `/bin/bash` in the Docker graph hook is unavailable to the Windows
+pre-commit launcher. Its script was run explicitly with Git Bash and the same
+three paths, where it exited successfully because the Dockerfile is unaffected.
+The command used for the wrapper was `SKIP=update-dockerfile-graph`, followed by
+`bash tools/pre_commit/update-dockerfile-graph.sh` with those paths.
+
+For the current Windows checkout and an artifact clone in a sibling directory,
+the review commands are as follows. The active checkout already has `.venv`
+with the hook runner installed. `check_docs.py` needs the documentation packages.
+
+```powershell
+$artifacts = '../epd-sizing-artifacts'
+.venv/Scripts/python.exe "$artifacts/check_sizing.py" --repo .
+$env:PATH = 'C:/Program Files/Git/bin;' + (Resolve-Path .venv/Scripts).Path + ';' + $env:PATH
+$env:SKIP = 'update-dockerfile-graph'
+.venv/Scripts/python.exe -m pre_commit run --files examples/disaggregated/disaggregated_encoder/size_epd.py examples/disaggregated/disaggregated_encoder/README.md docs/features/disagg_encoder.md
+& 'C:/Program Files/Git/bin/bash.exe' tools/pre_commit/update-dockerfile-graph.sh examples/disaggregated/disaggregated_encoder/size_epd.py examples/disaggregated/disaggregated_encoder/README.md docs/features/disagg_encoder.md
+git diff --check origin/main...HEAD
+```
+
+## PR checklist review
+
+- Design fit. The upstream diff contains 91 lines of standalone Python and two
+  documentation additions. The example uses the standard library and accepts
+  explicit service rates. Engine execution paths and configuration defaults are
+  outside this diff.
+- Testing and validation. The CLI cases, raw result audit, scoped documentation
+  render and applicable pre-commit hooks passed. The GPU replay used pinned
+  vLLM 0.33.0. The current review commit is based on upstream `fc982d42`.
+  No upstream CI run has been requested. GPU replay and the external audit are
+  manual validation documented here.
+- Code quality. The example validates finite positive rates and sufficient GPU
+  budget, reports every candidate split and consistently resolves ties toward
+  fewer encoders. The rendered feature guide links to the example.
+- PR contents. The description includes duplicate-work checks, exact environment
+  and commands, measurements, raw archives, the single-shift limitation and AI
+  assistance disclosure. Human code review and relevant test execution remain
+  the submitting person's final checklist items.

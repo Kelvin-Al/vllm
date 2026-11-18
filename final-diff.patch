@@ -1,0 +1,172 @@
+diff --git a/docs/features/disagg_encoder.md b/docs/features/disagg_encoder.md
+index c528a930..e384062b 100644
+--- a/docs/features/disagg_encoder.md
++++ b/docs/features/disagg_encoder.md
+@@ -42,6 +42,21 @@ The following scripts demonstrate the workflow with **ExampleConnector**:
+ 1 Encoder instance + 1 Prefill instance + 1 Decode instance:
+ `examples/disaggregated/disaggregated_encoder/disagg_1e1p1d_example.sh`
+ 
++#### Size an E+PD deployment
++
++For a fixed GPU budget with one GPU per worker, the sizing example estimates
++how many GPUs to assign to the encoder and combined prefill/decode pools. Run
++it from the vLLM checkout with measured saturation rates in requests per second:
++
++```bash
++python examples/disaggregated/disaggregated_encoder/size_epd.py \
++    --num-gpus 8 --encoder-rps 57 --pd-rps 14.3
++```
++
++It reports the recommended split, estimated capacity, and limiting pool. See the
++[Disaggregated Encoder example](../examples/disaggregated/disaggregated_encoder.md)
++for the stage measurement and replay procedure.
++
+ ### ECMooncakeConnector
+ 
+ **ECMooncakeConnector** transfers encoder outputs using the Mooncake TransferEngine.
+diff --git a/examples/disaggregated/disaggregated_encoder/README.md b/examples/disaggregated/disaggregated_encoder/README.md
+index 3969e811..82036239 100644
+--- a/examples/disaggregated/disaggregated_encoder/README.md
++++ b/examples/disaggregated/disaggregated_encoder/README.md
+@@ -12,6 +12,44 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
+ 
+ - `disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
+ 
++- `size_epd.py` - Estimates an E+PD split from measured single-worker saturation rates.
++
++## Size an E+PD deployment
++
++The sizing example assumes one GPU per worker, a fixed serving configuration,
++and replicas with comparable service rates. For each split it estimates capacity
++as the smaller of the two pools' aggregate rates. Run it with the total GPU
++budget and both single-worker rates in completed requests per second:
++
++```bash
++python examples/disaggregated/disaggregated_encoder/size_epd.py \
++    --num-gpus 8 --encoder-rps 57 --pd-rps 14.3
++```
++
++This example recommends two encoder and six combined prefill/decode workers, with
++an estimated capacity of 85.8 requests per second and PD as the bottleneck.
++Tied estimates favor the split with fewer encoder workers.
++
++1. Benchmark a representative workload through the E+PD proxy with one
++   encoder and enough PD workers to keep up. Increase offered load until the
++   encoder stays backlogged and its completion rate levels off. Record the
++   encoder's completion rate in a steady window from `/metrics`.
++2. Repeat with one PD worker and enough encoder workers to keep it supplied.
++   Use the PD worker's completion rate once it stays backlogged. Use the same
++   model, workload distribution, batching, and cache policy for both runs.
++3. Save the recommendation before testing it. Replay independent requests
++   drawn from the same workload distribution at a load that saturates the
++   deployment. Compare the summed PD completion rates in the same steady
++   window for each candidate split. For a cold-cache comparison, restart the
++   workers between runs, use fresh encoder-cache directories, and disable
++   prefix caching.
++
++Use successful `vllm:request_success_total` counter deltas over the measurement
++window and `vllm:num_requests_waiting` to confirm that the target is backlogged.
++Replica imbalance and shared transport or host resources can reduce measured
++capacity. If the request mix changes, supply rates representative of the new
++mix.
++
+ ### Custom Configuration
+ 
+ ```bash
+diff --git a/examples/disaggregated/disaggregated_encoder/size_epd.py b/examples/disaggregated/disaggregated_encoder/size_epd.py
+new file mode 100644
+index 00000000..50d86fb3
+--- /dev/null
++++ b/examples/disaggregated/disaggregated_encoder/size_epd.py
+@@ -0,0 +1,91 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Recommend a single-node E+PD GPU split from measured worker rates."""
++
++import argparse
++import json
++from fractions import Fraction
++from math import isfinite
++
++
++def positive_rate(value: str) -> Fraction:
++    try:
++        rate = Fraction(value)
++        if rate > 0 and isfinite(float(rate)) and float(rate) > 0:
++            return rate
++    except (ValueError, ZeroDivisionError, OverflowError):
++        pass
++    raise argparse.ArgumentTypeError("expected a positive finite request rate")
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument(
++        "--num-gpus", type=int, required=True, help="Total GPU budget, at least two."
++    )
++    parser.add_argument(
++        "--encoder-rps",
++        type=positive_rate,
++        required=True,
++        help="Measured saturation rate per single-GPU encoder in requests/s.",
++    )
++    parser.add_argument(
++        "--pd-rps",
++        type=positive_rate,
++        required=True,
++        help="Measured saturation rate per single-GPU PD worker in requests/s.",
++    )
++    args = parser.parse_args()
++    if args.num_gpus < 2:
++        parser.error("--num-gpus must be at least 2")
++    try:
++        finite_capacity = isfinite(
++            float(max(args.encoder_rps, args.pd_rps) * args.num_gpus)
++        )
++    except OverflowError:
++        finite_capacity = False
++    if not finite_capacity:
++        parser.error("total worker capacity must be finite")
++
++    candidates = []
++    for num_encoders in range(1, args.num_gpus):
++        num_pd = args.num_gpus - num_encoders
++        encoder_capacity = num_encoders * args.encoder_rps
++        pd_capacity = num_pd * args.pd_rps
++        if encoder_capacity < pd_capacity:
++            bottleneck = "encoder"
++        elif pd_capacity < encoder_capacity:
++            bottleneck = "pd"
++        else:
++            bottleneck = "both"
++        candidates.append(
++            (
++                min(encoder_capacity, pd_capacity),
++                {
++                    "encoder_gpus": num_encoders,
++                    "pd_gpus": num_pd,
++                    "bottleneck": bottleneck,
++                },
++            )
++        )
++
++    capacity, recommendation = max(candidates, key=lambda candidate: candidate[0])
++    print(
++        json.dumps(
++            {
++                **recommendation,
++                "encoder_rps": float(args.encoder_rps),
++                "pd_rps": float(args.pd_rps),
++                "predicted_capacity_rps": float(capacity),
++                "candidate_allocations": [
++                    {**allocation, "predicted_capacity_rps": float(rate)}
++                    for rate, allocation in candidates
++                ],
++            },
++            indent=2,
++        )
++    )
++
++
++if __name__ == "__main__":
++    main()

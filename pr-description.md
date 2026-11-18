@@ -4,6 +4,8 @@ Add a runnable sizing example for a single-node E+PD deployment with one GPU
 per worker. Given a GPU budget and measured encoder and combined prefill/decode
 rates, report the recommended split, estimated capacity, and bottleneck.
 
+Title: **[Example] Add workload-aware E+PD GPU sizing**
+
 Refs [#67204](https://github.com/vllm-project/vllm/issues/67204) and the
 [EPD tracker](https://github.com/vllm-project/vllm/issues/52409). A search of
 open PRs for EPD sizing, planning, and references to #67204 found related
@@ -44,12 +46,20 @@ git diff --check
 ```
 
 Four expected allocations and eight invalid inputs pass through the real CLI.
+The review branch is commit
+[`d87c252954df0d4970e6c5e5f216a48e2bba12e9`](https://github.com/Kelvin-Al/vllm/commit/d87c252954df0d4970e6c5e5f216a48e2bba12e9),
+rebased on upstream `fc982d42` on November 18, 2026. The GPU measurements use
+the explicitly pinned 0.33.0 runtime below.
 The audit and documentation commands are in the public
 [reproduction guide](https://github.com/Kelvin-Al/vllm/tree/epd-sizing-67204-artifacts)
 with [check output](https://github.com/Kelvin-Al/vllm/blob/epd-sizing-67204-artifacts/checks.log).
 The whole-site Windows MkDocs attempt encountered a CUDA extension import in
 unrelated CLI-reference generation. The recorded scoped build renders the changed
 pages with the repository's example generator.
+On Windows, `SKIP=update-dockerfile-graph` was used for the pre-commit wrapper
+because its shebang requires `/bin/bash`. The same script passed when invoked
+explicitly with Git Bash and the three changed paths. All other applicable hooks
+passed, including Ruff, mypy, Markdown, spelling, SPDX and docstring checks.
 
 For the SuperPOD replay, use four H800 GPUs on one node and vLLM `v0.33.0`
 at revision `4ba787ec9959e566d3b587a796dff07673324da5`. The workload uses
